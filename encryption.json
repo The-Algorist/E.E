@@ -1,0 +1,255 @@
+{
+    "info": {
+        "name": "Encryption Service API",
+        "description": "Complete API testing suite for the Encryption Service",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "variable": [
+        {
+            "key": "baseUrl",
+            "value": "http://localhost:8080",
+            "type": "string"
+        }
+    ],
+    "item": [
+        {
+            "name": "1. Health & Monitoring",
+            "item": [
+                {
+                    "name": "Health Check",
+                    "request": {
+                        "method": "GET",
+                        "url": "{{baseUrl}}/health",
+                        "description": "Check if the service and its dependencies are healthy"
+                    }
+                },
+                {
+                    "name": "Metrics",
+                    "request": {
+                        "method": "GET",
+                        "url": "{{baseUrl}}/metrics",
+                        "description": "Get Prometheus metrics"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "2. Single Job Operations",
+            "item": [
+                {
+                    "name": "Create Single Encryption Job",
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "exec": [
+                                    "var jsonData = pm.response.json();",
+                                    "if (jsonData.job_id) {",
+                                    "    pm.environment.set('jobId', jsonData.job_id);",
+                                    "}"
+                                ],
+                                "type": "text/javascript"
+                            }
+                        }
+                    ],
+                    "request": {
+                        "method": "POST",
+                        "url": "{{baseUrl}}/api/v1/encrypt",
+                        "header": {
+                            "Content-Type": "application/json"
+                        },
+                        "body": {
+                            "mode": "raw",
+                            "raw": {
+                                "files": [
+                                    {
+                                        "path": "/tmp/test1.txt",
+                                        "operation": "encrypt"
+                                    }
+                                ],
+                                "batch": false
+                            }
+                        }
+                    }
+                },
+                {
+                    "name": "Get Job Status",
+                    "request": {
+                        "method": "GET",
+                        "url": "{{baseUrl}}/api/v1/status/{{jobId}}"
+                    }
+                },
+                {
+                    "name": "Pause Job",
+                    "request": {
+                        "method": "POST",
+                        "url": "{{baseUrl}}/api/v1/job/{{jobId}}/pause"
+                    }
+                },
+                {
+                    "name": "Resume Job",
+                    "request": {
+                        "method": "POST",
+                        "url": "{{baseUrl}}/api/v1/job/{{jobId}}/resume"
+                    }
+                },
+                {
+                    "name": "Stop Job",
+                    "request": {
+                        "method": "POST",
+                        "url": "{{baseUrl}}/api/v1/job/{{jobId}}/stop"
+                    }
+                },
+                {
+                    "name": "List All Jobs",
+                    "request": {
+                        "method": "GET",
+                        "url": "{{baseUrl}}/api/v1/jobs"
+                    }
+                },
+                {
+                    "name": "Jobs Status Summary",
+                    "request": {
+                        "method": "GET",
+                        "url": "{{baseUrl}}/api/v1/jobs/status"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "3. Batch Operations",
+            "item": [
+                {
+                    "name": "Create Batch Job",
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "exec": [
+                                    "var jsonData = pm.response.json();",
+                                    "if (jsonData.batch_id) {",
+                                    "    pm.environment.set('batchId', jsonData.batch_id);",
+                                    "}"
+                                ],
+                                "type": "text/javascript"
+                            }
+                        }
+                    ],
+                    "request": {
+                        "method": "POST",
+                        "url": "{{baseUrl}}/api/v1/encrypt",
+                        "header": {
+                            "Content-Type": "application/json"
+                        },
+                        "body": {
+                            "mode": "raw",
+                            "raw": {
+                                "files": [
+                                    {
+                                        "path": "/tmp/test1.txt",
+                                        "operation": "encrypt"
+                                    },
+                                    {
+                                        "path": "/tmp/test2.txt",
+                                        "operation": "encrypt"
+                                    }
+                                ],
+                                "batch": true
+                            }
+                        }
+                    }
+                },
+                {
+                    "name": "Get Batch Result",
+                    "request": {
+                        "method": "GET",
+                        "url": "{{baseUrl}}/api/v1/batch/{{batchId}}"
+                    }
+                },
+                {
+                    "name": "List All Batches",
+                    "request": {
+                        "method": "GET",
+                        "url": "{{baseUrl}}/api/v1/batch"
+                    }
+                },
+                {
+                    "name": "List Filtered Batches",
+                    "request": {
+                        "method": "GET",
+                        "url": "{{baseUrl}}/api/v1/batch",
+                        "query": [
+                            {
+                                "key": "status",
+                                "value": "success"
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "4. Error Cases",
+            "item": [
+                {
+                    "name": "Invalid Job ID",
+                    "request": {
+                        "method": "GET",
+                        "url": "{{baseUrl}}/api/v1/status/invalid-id"
+                    }
+                },
+                {
+                    "name": "Empty Batch Request",
+                    "request": {
+                        "method": "POST",
+                        "url": "{{baseUrl}}/api/v1/encrypt",
+                        "header": {
+                            "Content-Type": "application/json"
+                        },
+                        "body": {
+                            "mode": "raw",
+                            "raw": {
+                                "files": [],
+                                "batch": true
+                            }
+                        }
+                    }
+                },
+                {
+                    "name": "Invalid Operation Type",
+                    "request": {
+                        "method": "POST",
+                        "url": "{{baseUrl}}/api/v1/encrypt",
+                        "header": {
+                            "Content-Type": "application/json"
+                        },
+                        "body": {
+                            "mode": "raw",
+                            "raw": {
+                                "files": [
+                                    {
+                                        "path": "/tmp/test.txt",
+                                        "operation": "invalid_operation"
+                                    }
+                                ],
+                                "batch": false
+                            }
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "name": "5. Engine Operations",
+            "item": [
+                {
+                    "name": "Stop Engine",
+                    "request": {
+                        "method": "POST",
+                        "url": "{{baseUrl}}/api/v1/engine/stop"
+                    }
+                }
+            ]
+        }
+    ]
+}
