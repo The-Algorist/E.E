@@ -3,6 +3,7 @@ package domain
 import (
     "fmt"
     "net/http"
+
 )
 
 // JobStateError represents an error with job state transition
@@ -40,6 +41,7 @@ type BatchErrorResponse struct {
     Message string         `json:"message"`
     Errors  []BatchError   `json:"errors,omitempty"`
     Details *BatchDetails  `json:"details,omitempty"`
+    RequestID string        `json:"request_id,omitempty"`
 }
 
 type BatchError struct {
@@ -109,12 +111,13 @@ var ErrorStatusMap = map[string]int{
 }
 
 // NewBatchErrorResponse creates a new BatchErrorResponse
-func NewBatchErrorResponse(message string, errs []BatchError, details *BatchDetails) BatchErrorResponse {
+func NewBatchErrorResponse(message string, errs []BatchError, details *BatchDetails, requestID string) BatchErrorResponse {
     return BatchErrorResponse{
-        Status:  "error",
-        Message: message,
-        Errors:  errs,
-        Details: details,
+        Status:    "error",
+        Message:   message,
+        Errors:    errs,
+        Details:   details,
+        RequestID: requestID,
     }
 }
 
@@ -203,6 +206,7 @@ func GetBatchErrorResponse(err error, action string) (BatchErrorResponse, int) {
         "Operation failed",
         []BatchError{batchError},
         details,
+        "",
     )
 
     return response, GetBatchErrorHTTPStatus(response)

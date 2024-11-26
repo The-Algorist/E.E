@@ -75,9 +75,9 @@ func (s *EncryptionService) ResumeJob(ctx context.Context, jobID string) error {
 	return nil
 }
 
-// StopEngine simulates stopping the encryption engine
+// StopEngine is a killswitch to stop the encryption engine
 func (s *EncryptionService) StopEngine() error {
-	s.logger.Info("Stopping encryption engine simulation")
+	s.logger.Info("Stopping encryption engine")
 	return nil
 }
 

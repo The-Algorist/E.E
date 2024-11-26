@@ -112,3 +112,10 @@ type SortField struct {
 type JobSort struct {
 	Fields []SortField
 }
+
+// JobStatusSummaryResponse represents the response for job status summary
+type JobStatusSummaryResponse struct {
+	Summary   map[string]interface{} `json:"summary"`
+	Timestamp int64                 `json:"timestamp"`
+	Message   string                `json:"message"`
+}

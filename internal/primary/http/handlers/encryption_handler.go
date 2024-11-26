@@ -1,29 +1,31 @@
 package handlers
+
 import (
-	"net/http"
+	// "net/http"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"strconv"
 	"time"
-	"strings"
 	"errors"
-
+	"strings"
+	"net/http"
+	
 	"E.E/internal/core/domain"
 	"E.E/internal/core/ports"
 	"E.E/internal/core/services"
-	
 )
 
 type EncryptionHandler struct {
 	encryptionService ports.EncryptionService
 	logger           *zap.Logger
+	errorHandler     *ErrorHandler
 }
 
 func NewEncryptionHandler(service ports.EncryptionService, logger *zap.Logger) *EncryptionHandler {
 	return &EncryptionHandler{
 		encryptionService: service,
 		logger:           logger,
-
+		errorHandler:     NewErrorHandler(logger),
 	}
 }
 
@@ -31,258 +33,134 @@ func NewEncryptionHandler(service ports.EncryptionService, logger *zap.Logger) *
 func (h *EncryptionHandler) StartEncryption(c *gin.Context) {
 	var req domain.EncryptionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		h.logger.Error("Invalid request format", zap.Error(err))
-		c.JSON(http.StatusBadRequest, domain.NewBatchErrorResponse(
+		h.errorHandler.HandleError(c,
+			domain.StatusBadRequest,
 			"Invalid request format",
 			[]domain.BatchError{{
 				Field:   "request",
 				Message: err.Error(),
 				Code:    domain.ErrCodeInvalidFormat,
 			}},
-			nil,
-		))
+		)
 		return
 	}
 
 	if req.Batch {
-		op := domain.BatchOperation{
-			Action:     req.Action,
-			SourceURLs: req.SourceURLs,
-			JobIDs:     req.JobIDs,
-		}
-		
-		result, err := h.encryptionService.ProcessBatch(c.Request.Context(), op)
-		if err != nil {
-			h.logger.Error("Failed to process batch", zap.Error(err))
-			
-			var jobStateErr *domain.JobStateError
-			if errors.As(err, &jobStateErr) {
-				c.JSON(http.StatusConflict, domain.NewBatchErrorResponse(
-					"Invalid job state",
-					[]domain.BatchError{domain.ConvertJobStateErrorToBatchError(jobStateErr)},
-					&domain.BatchDetails{
-						Action: string(op.Action),
-						JobIDs: op.JobIDs,
-					},
-				))
-				return
-			}
-
-			c.JSON(http.StatusBadRequest, domain.NewBatchErrorResponse(
-				"Failed to process batch operation",
-				[]domain.BatchError{{
-					Field:      "batch",
-					Message:    err.Error(),
-					Code:       domain.ErrCodeBatchOperation,
-					ActionType: string(op.Action),
-				}},
-				&domain.BatchDetails{
-					Action:     string(op.Action),
-					JobIDs:     op.JobIDs,
-					SourceURLs: op.SourceURLs,
-				},
-			))
-			return
-		}
-		
-		c.JSON(http.StatusAccepted, result)
+		h.handleBatchEncryption(c, req)
 		return
 	}
 
-	// Handle single file operation
+	h.handleSingleEncryption(c, req)
+}
+
+func (h *EncryptionHandler) handleBatchEncryption(c *gin.Context, req domain.EncryptionRequest) {
+	op := domain.BatchOperation{
+		Action:     req.Action,
+		SourceURLs: req.SourceURLs,
+		JobIDs:     req.JobIDs,
+	}
+	
+	result, err := h.encryptionService.ProcessBatch(c.Request.Context(), op)
+	if err != nil {
+		var jobStateErr *domain.JobStateError
+		if errors.As(err, &jobStateErr) {
+			h.errorHandler.HandleStateError(c, jobStateErr)
+			return
+		}
+		
+		h.errorHandler.HandleBatchError(c,
+			domain.StatusBadRequest,
+			"Failed to process batch operation",
+			[]domain.BatchError{{
+				Field:      "batch",
+				Message:    err.Error(),
+				Code:       domain.ErrCodeBatchOperation,
+				ActionType: string(op.Action),
+			}},
+			&domain.BatchDetails{
+				Action:     string(op.Action),
+				JobIDs:     op.JobIDs,
+				SourceURLs: op.SourceURLs,
+			},
+		)
+		return
+	}
+	
+	c.JSON(domain.StatusAccepted, result)
+}
+
+func (h *EncryptionHandler) handleSingleEncryption(c *gin.Context, req domain.EncryptionRequest) {
 	if req.SourceURL == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "source_url is required for single operations",
-		})
+		h.errorHandler.HandleError(c,
+			domain.StatusBadRequest,
+			"Validation error",
+			[]domain.BatchError{
+				domain.NewValidationError("source_url", "source_url is required for single operations", ""),
+			},
+		)
 		return
 	}
 
 	job, err := h.encryptionService.StartEncryption(c.Request.Context(), req.SourceURL)
 	if err != nil {
-		h.logger.Error("Failed to start encryption", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to start encryption",
-		})
+		h.errorHandler.HandleError(c,
+			domain.StatusInternalServerError,
+			"Failed to start encryption",
+			[]domain.BatchError{{
+				Field:   "general",
+				Message: err.Error(),
+				Code:    domain.ErrCodeEncryptionFailed,
+			}},
+		)
 		return
 	}
 
-	response := domain.EncryptionResponse{
+	c.JSON(domain.StatusAccepted, domain.EncryptionResponse{
 		JobID:     job.ID,
 		Status:    job.Status,
 		CreatedAt: job.CreatedAt,
-	}
-
-	c.JSON(http.StatusAccepted, response)
+	})
 }
 
 // GetStatus handles the request to check encryption status
 func (h *EncryptionHandler) GetStatus(c *gin.Context) {
 	jobID := c.Param("jobId")
 	if jobID == "" {
-		errResp := domain.NewBatchErrorResponse(
+		h.errorHandler.HandleError(c,
+			domain.StatusBadRequest,
 			"Validation error",
 			[]domain.BatchError{domain.NewValidationError("job_id", "job_id is required", "")},
-			nil,
 		)
-		c.JSON(domain.StatusBadRequest, errResp)
 		return
 	}
 
 	job, err := h.encryptionService.GetJobStatus(c.Request.Context(), jobID)
 	if err != nil {
-		h.logger.Error("Failed to get job status", 
-			zap.Error(err), 
-			zap.String("jobId", jobID),
-		)
-		
 		if errors.Is(err, domain.ErrJobNotFound) {
-			errResp := domain.NewBatchErrorResponse(
+			h.errorHandler.HandleError(c,
+				domain.StatusNotFound,
 				"Job not found",
 				[]domain.BatchError{domain.NewNotFoundError("job", jobID)},
-				nil,
 			)
-			c.JSON(domain.StatusNotFound, errResp)
 			return
 		}
 
-		errResp, status := domain.GetBatchErrorResponse(err, "get_status")
-		c.JSON(status, errResp)
+		h.errorHandler.HandleError(c,
+			domain.StatusInternalServerError,
+			"Failed to get job status",
+			[]domain.BatchError{{
+				Field:   "general",
+				Message: err.Error(),
+				Code:    domain.ErrCodeEncryptionFailed,
+			}},
+		)
 		return
 	}
 
 	c.JSON(domain.StatusOK, job)
 }
 
-// PauseJob handles the request to pause an encryption job
-func (h *EncryptionHandler) PauseJob(c *gin.Context) {
-	jobID := c.Param("jobId")
-	if jobID == "" {
-		errResp := domain.NewBatchErrorResponse(
-			"Validation error",
-			[]domain.BatchError{domain.NewValidationError("job_id", "job_id is required", "")},
-			nil,
-		)
-		c.JSON(domain.StatusBadRequest, errResp)
-		return
-	}
-
-	if err := h.encryptionService.PauseJob(c.Request.Context(), jobID); err != nil {
-		h.logger.Error("Failed to pause job", 
-			zap.Error(err), 
-			zap.String("jobId", jobID),
-		)
-
-		var jobStateErr *domain.JobStateError
-		if errors.As(err, &jobStateErr) {
-			errResp := domain.NewBatchErrorResponse(
-				"Invalid job state",
-				[]domain.BatchError{domain.ConvertJobStateErrorToBatchError(jobStateErr)},
-				&domain.BatchDetails{
-					Action: "pause",
-					JobIDs: []string{jobID},
-				},
-			)
-			c.JSON(domain.StatusConflict, errResp)
-			return
-		}
-
-		errResp, status := domain.GetBatchErrorResponse(err, "pause")
-		c.JSON(status, errResp)
-		return
-	}
-
-	c.JSON(domain.StatusOK, gin.H{
-		"message": "Job paused successfully",
-		"job_id":  jobID,
-		"status":  domain.StatusPaused,
-	})
-}
-
-// ResumeJob handles the request to resume an encryption job
-func (h *EncryptionHandler) ResumeJob(c *gin.Context) {
-	jobID := c.Param("jobId")
-	if jobID == "" {
-		errResp := domain.NewBatchErrorResponse(
-			"Validation error",
-			[]domain.BatchError{domain.NewValidationError("job_id", "job_id is required", "")},
-			nil,
-		)
-		c.JSON(domain.StatusBadRequest, errResp)
-		return
-	}
-
-	if err := h.encryptionService.ResumeJob(c.Request.Context(), jobID); err != nil {
-		h.logger.Error("Failed to resume job", 
-			zap.Error(err), 
-			zap.String("jobId", jobID),
-		)
-
-		if errors.Is(err, domain.ErrJobNotFound) {
-			errResp := domain.NewBatchErrorResponse(
-				"Job not found",
-				[]domain.BatchError{domain.NewNotFoundError("job", jobID)},
-				nil,
-			)
-			c.JSON(domain.StatusNotFound, errResp)
-			return
-		}
-
-		errResp, status := domain.GetBatchErrorResponse(err, "resume")
-		c.JSON(status, errResp)
-		return
-	}
-
-	c.JSON(domain.StatusOK, gin.H{
-		"message": "Job resumed successfully",
-		"job_id":  jobID,
-		"status":  domain.StatusProgress,
-	})
-}
-
-// StopEngine handles the request to stop the encryption engine
-func (h *EncryptionHandler) StopEngine(c *gin.Context) {
-	if err := h.encryptionService.StopEngine(); err != nil {
-		h.logger.Error("Failed to stop encryption engine", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to stop encryption engine",
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Encryption engine stopped successfully",
-	})
-}
-
-// StopJob handles the request to stop a specific encryption job
-func (h *EncryptionHandler) StopJob(c *gin.Context) {
-	jobID := c.Param("jobId")
-	if jobID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "job_id is required",
-		})
-		return
-	}
-
-	if err := h.encryptionService.StopJob(c.Request.Context(), jobID); err != nil {
-		h.logger.Error("Failed to stop job", 
-			zap.Error(err), 
-			zap.String("jobId", jobID),
-		)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to stop job",
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Job stopped successfully",
-		"job_id":  jobID,
-		"status":  domain.StatusFailed,
-	})
-}
-
-// ListJobs returns the list of all jobs with their history
+// ListJobs handles the request to list all jobs
 func (h *EncryptionHandler) ListJobs(c *gin.Context) {
 	// Pagination
 	limit := 10
@@ -350,6 +228,7 @@ func (h *EncryptionHandler) ListJobs(c *gin.Context) {
 					domain.NewValidationError("sort", err.Error(), sort.Fields[0].Field),
 				},
 				nil,
+				"",
 			)
 			c.JSON(domain.StatusBadRequest, errResp)
 			return
@@ -361,16 +240,16 @@ func (h *EncryptionHandler) ListJobs(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"jobs": jobs,
+	c.JSON(domain.StatusOK, gin.H{
+		"jobs":       jobs,
 		"pagination": gin.H{
 			"limit":  limit,
 			"offset": offset,
 			"total":  len(jobs),
 		},
-		"filter": filter,
-		"sort": sort,
-		"available_sort_options": services.GetAvailableSortOptions(),
+		"filter":       filter,
+		"sort":        sort,
+		"sort_options": services.GetAvailableSortOptions(),
 	})
 }
 
@@ -386,7 +265,352 @@ func (h *EncryptionHandler) JobsStatus(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, summary)
+	response := domain.JobStatusSummaryResponse{
+		Summary:   summary,
+		Timestamp: time.Now().Unix(),
+		Message:   "Job status summary retrieved successfully",
+	}
+	c.JSON(domain.StatusOK, response)
+}
+
+// ProcessBatch handles the request to process a batch of encryption jobs
+func (h *EncryptionHandler) ProcessBatch(c *gin.Context) {
+	var op domain.BatchOperation
+	if err := c.ShouldBindJSON(&op); err != nil {
+		h.errorHandler.HandleError(c,
+			domain.StatusBadRequest,
+			"Invalid request format",
+			[]domain.BatchError{{
+				Field:   "request",
+				Message: err.Error(),
+				Code:    domain.ErrCodeInvalidFormat,
+			}},
+		)
+		return
+	}
+
+	result, err := h.encryptionService.ProcessBatch(c.Request.Context(), op)
+	if err != nil {
+		h.errorHandler.HandleBatchError(c,
+			domain.StatusInternalServerError,
+			"Failed to process batch operation",
+			[]domain.BatchError{{
+				Field:   "general",
+				Message: err.Error(),
+				Code:    domain.ErrCodeBatchOperation,
+			}},
+			&domain.BatchDetails{
+				Action: string(op.Action),
+				JobIDs: op.JobIDs,
+			},
+		)
+		return
+	}
+
+	c.JSON(domain.StatusOK, result)
+}
+
+// GetBatchResult handles the request to retrieve a batch operation result
+func (h *EncryptionHandler) GetBatchResult(c *gin.Context) {
+	batchID := c.Param("batchId")
+	if batchID == "" {
+		h.errorHandler.HandleError(c,
+			domain.StatusBadRequest,
+			"Validation error",
+			[]domain.BatchError{domain.NewValidationError("batch_id", "batch_id is required", "")},
+		)
+		return
+	}
+
+	result, err := h.encryptionService.GetBatchResult(c.Request.Context(), batchID)
+	if err != nil {
+		if errors.Is(err, domain.ErrBatchNotFound) {
+			h.errorHandler.HandleError(c,
+				domain.StatusNotFound,
+				"Batch not found",
+				[]domain.BatchError{domain.NewNotFoundError("batch", batchID)},
+			)
+			return
+		}
+
+		h.errorHandler.HandleError(c,
+			domain.StatusInternalServerError,
+			"Failed to get batch result",
+			[]domain.BatchError{{
+				Field:   "general",
+				Message: err.Error(),
+				Code:    domain.ErrCodeBatchOperation,
+			}},
+		)
+		return
+	}
+
+	c.JSON(domain.StatusOK, gin.H{
+		"batch_id":  batchID,
+		"result":    result,
+		"timestamp": time.Now().Unix(),
+		"message":   "Batch result retrieved successfully",
+	})
+}
+
+// GetJobHistory handles the request to retrieve job history
+func (h *EncryptionHandler) GetJobHistory(c *gin.Context) {
+	jobID := c.Param("jobId")
+	if jobID == "" {
+		h.errorHandler.HandleError(c,
+			domain.StatusBadRequest,
+			"Validation error",
+			[]domain.BatchError{domain.NewValidationError("job_id", "job_id is required", "")},
+		)
+		return
+	}
+
+	history, err := h.encryptionService.GetJobHistory(c.Request.Context(), jobID)
+	if err != nil {
+		if errors.Is(err, domain.ErrJobNotFound) {
+			h.errorHandler.HandleError(c,
+				domain.StatusNotFound,
+				"Job not found",
+				[]domain.BatchError{domain.NewNotFoundError("job", jobID)},
+			)
+			return
+		}
+
+		h.errorHandler.HandleError(c,
+			domain.StatusInternalServerError,
+			"Failed to get job history",
+			[]domain.BatchError{{
+				Field:   "general",
+				Message: err.Error(),
+				Code:    domain.ErrCodeEncryptionFailed,
+			}},
+		)
+		return
+	}
+
+	c.JSON(domain.StatusOK, history)
+}
+
+// PauseJob handles the request to pause an encryption job
+func (h *EncryptionHandler) PauseJob(c *gin.Context) {
+	jobID := c.Param("jobId")
+	if jobID == "" {
+		h.errorHandler.HandleError(c,
+			domain.StatusBadRequest,
+			"Validation error",
+			[]domain.BatchError{domain.NewValidationError("job_id", "job_id is required", "")},
+		)
+		return
+	}
+
+	job, err := h.encryptionService.GetJobStatus(c.Request.Context(), jobID)
+	if err != nil {
+		if errors.Is(err, domain.ErrJobNotFound) {
+			h.errorHandler.HandleError(c,
+				domain.StatusNotFound,
+				"Job not found",
+				[]domain.BatchError{domain.NewNotFoundError("job", jobID)},
+			)
+			return
+		}
+		h.errorHandler.HandleError(c,
+			domain.StatusInternalServerError,
+			"Failed to get job status",
+			[]domain.BatchError{{
+				Field:   "general",
+				Message: err.Error(),
+				Code:    domain.ErrCodeEncryptionFailed,
+			}},
+		)
+		return
+	}
+
+	if err := job.CanPause(); err != nil {
+		var stateErr *domain.JobStateError
+		if errors.As(err, &stateErr) {
+			h.errorHandler.HandleStateError(c, stateErr)
+			return
+		}
+	}
+
+	if err := h.encryptionService.PauseJob(c.Request.Context(), jobID); err != nil {
+		h.errorHandler.HandleError(c,
+			domain.StatusInternalServerError,
+			"Failed to pause job",
+			[]domain.BatchError{{
+				Field:   "general",
+				Message: err.Error(),
+				Code:    domain.ErrCodeEncryptionFailed,
+			}},
+		)
+		return
+	}
+
+	c.JSON(domain.StatusOK, gin.H{
+		"job_id":  jobID,
+		"status":  domain.StatusPaused,
+		"message": "Job paused successfully",
+	})
+}
+
+// ResumeJob handles the request to resume an encryption job
+func (h *EncryptionHandler) ResumeJob(c *gin.Context) {
+	jobID := c.Param("jobId")
+	if jobID == "" {
+		h.errorHandler.HandleError(c,
+			domain.StatusBadRequest,
+			"Validation error",
+			[]domain.BatchError{domain.NewValidationError("job_id", "job_id is required", "")},
+		)
+		return
+	}
+
+	job, err := h.encryptionService.GetJobStatus(c.Request.Context(), jobID)
+	if err != nil {
+		if errors.Is(err, domain.ErrJobNotFound) {
+			h.errorHandler.HandleError(c,
+				domain.StatusNotFound,
+				"Job not found",
+				[]domain.BatchError{domain.NewNotFoundError("job", jobID)},
+			)
+			return
+		}
+		h.errorHandler.HandleError(c,
+			domain.StatusInternalServerError,
+			"Failed to get job status",
+			[]domain.BatchError{{
+				Field:   "general",
+				Message: err.Error(),
+				Code:    domain.ErrCodeEncryptionFailed,
+			}},
+		)
+		return
+	}
+
+	if err := job.CanResume(); err != nil {
+		var stateErr *domain.JobStateError
+		if errors.As(err, &stateErr) {
+			h.errorHandler.HandleStateError(c, stateErr)
+			return
+		}
+	}
+
+	if err := h.encryptionService.ResumeJob(c.Request.Context(), jobID); err != nil {
+		h.errorHandler.HandleError(c,
+			domain.StatusInternalServerError,
+			"Failed to resume job",
+			[]domain.BatchError{{
+				Field:   "general",
+				Message: err.Error(),
+				Code:    domain.ErrCodeEncryptionFailed,
+			}},
+		)
+		return
+	}
+
+	c.JSON(domain.StatusOK, gin.H{
+		"job_id":  jobID,
+		"status":  domain.StatusProgress,
+		"message": "Job resumed successfully",
+	})
+}
+
+// StopJob handles the request to stop an encryption job
+func (h *EncryptionHandler) StopJob(c *gin.Context) {
+	jobID := c.Param("jobId")
+	if jobID == "" {
+		h.errorHandler.HandleError(c,
+			domain.StatusBadRequest,
+			"Validation error",
+			[]domain.BatchError{domain.NewValidationError("job_id", "job_id is required", "")},
+		)
+		return
+	}
+
+	job, err := h.encryptionService.GetJobStatus(c.Request.Context(), jobID)
+	if err != nil {
+		if errors.Is(err, domain.ErrJobNotFound) {
+			h.errorHandler.HandleError(c,
+				domain.StatusNotFound,
+				"Job not found",
+				[]domain.BatchError{domain.NewNotFoundError("job", jobID)},
+			)
+			return
+		}
+		h.errorHandler.HandleError(c,
+			domain.StatusInternalServerError,
+			"Failed to get job status",
+			[]domain.BatchError{{
+				Field:   "general",
+				Message: err.Error(),
+				Code:    domain.ErrCodeEncryptionFailed,
+			}},
+		)
+		return
+	}
+
+	if err := job.CanStop(); err != nil {
+		var stateErr *domain.JobStateError
+		if errors.As(err, &stateErr) {
+			h.errorHandler.HandleStateError(c, stateErr)
+			return
+		}
+	}
+
+	if err := h.encryptionService.StopJob(c.Request.Context(), jobID); err != nil {
+		h.errorHandler.HandleError(c,
+			domain.StatusInternalServerError,
+			"Failed to stop job",
+			[]domain.BatchError{{
+				Field:   "general",
+				Message: err.Error(),
+				Code:    domain.ErrCodeEncryptionFailed,
+			}},
+		)
+		return
+	}
+
+	c.JSON(domain.StatusOK, gin.H{
+		"job_id":  jobID,
+		"status":  domain.StatusFailed,
+		"message": "Job stopped successfully",
+	})
+}
+
+// StopEngine handles the request to stop the encryption engine
+func (h *EncryptionHandler) StopEngine(c *gin.Context) {
+	if err := h.encryptionService.StopEngine(); err != nil {
+		h.errorHandler.HandleError(c,
+			domain.StatusInternalServerError,
+			"Failed to stop engine",
+			[]domain.BatchError{{
+				Field:   "general",
+				Message: err.Error(),
+				Code:    domain.ErrCodeEncryptionFailed,
+			}},
+		)
+		return
+	}
+
+	c.JSON(domain.StatusOK, gin.H{
+		"message": "Engine stopped successfully",
+	})
+}
+
+// Utility functions
+func parseTimestamp(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	// Try parsing as Unix timestamp
+	if ts, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return ts
+	}
+	// Try parsing as RFC3339
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.Unix()
+	}
+	return 0
 }
 
 func parseFloat(s string, defaultVal float64) float64 {
@@ -398,88 +622,4 @@ func parseFloat(s string, defaultVal float64) float64 {
 		return defaultVal
 	}
 	return val
-}
-
-func parseTimestamp(s string) int64 {
-	// Try parsing as Unix timestamp first
-	if ts, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return ts
-	}
-
-	// Try parsing as RFC3339 date
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t.Unix()
-	}
-
-	// Try parsing as simple date (YYYY-MM-DD)
-	if t, err := time.Parse("2006-01-02", s); err == nil {
-		return t.Unix()
-	}
-
-	return 0
-}
-
-// ProcessBatch handles the request to process a batch of encryption jobs
-func (h *EncryptionHandler) ProcessBatch(c *gin.Context) {
-	var op domain.BatchOperation
-	if err := c.ShouldBindJSON(&op); err != nil {
-		h.logger.Error("Invalid batch operation request", zap.Error(err))
-		errResp := domain.NewBatchErrorResponse(
-			"Invalid request format",
-			[]domain.BatchError{{
-				Field:   "request",
-				Message: err.Error(),
-				Code:    domain.ErrCodeInvalidFormat,
-			}},
-			nil,
-		)
-		c.JSON(domain.StatusBadRequest, errResp)
-		return
-	}
-
-	result, err := h.encryptionService.ProcessBatch(c.Request.Context(), op)
-	if err != nil {
-		h.logger.Error("Failed to process batch operation", zap.Error(err))
-		errResp, status := domain.GetBatchErrorResponse(err, string(op.Action))
-		c.JSON(status, errResp)
-		return
-	}
-
-	c.JSON(domain.StatusOK, result)
-}
-
-// GetBatchResult handles the request to retrieve a batch operation result
-func (h *EncryptionHandler) GetBatchResult(c *gin.Context) {
-	batchID := c.Param("batchId")
-	if batchID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "batch_id is required"})
-		return
-	}
-
-	result, err := h.encryptionService.GetBatchResult(c.Request.Context(), batchID)
-	if err != nil {
-		h.logger.Error("Failed to get batch result", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get batch result"})
-		return
-	}
-
-	c.JSON(http.StatusOK, result)
-}
-
-// GetJobHistory handles the request to retrieve job history
-func (h *EncryptionHandler) GetJobHistory(c *gin.Context) {
-	jobID := c.Param("jobId")
-	if jobID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "job_id is required"})
-		return
-	}
-
-	history, err := h.encryptionService.GetJobHistory(c.Request.Context(), jobID)
-	if err != nil {
-		h.logger.Error("Failed to get job history", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get job history"})
-		return
-	}
-
-	c.JSON(http.StatusOK, history)
 }
